@@ -1,0 +1,177 @@
+From 3d7d47d82dcdb79544756619a1637ba055b3346a Mon Sep 17 00:00:00 2001
+From: Eduardo Habkost <ehabkost@redhat.com>
+Date: Tue, 20 Apr 2010 20:58:52 -0300
+Subject: [PATCH] Don't use "lret $2" to return from an interrupt
+
+RH-Author: Eduardo Habkost <ehabkost@redhat.com>
+Message-id: <20100420205852.GO3088@blackpad.lan.raisama.net>
+Patchwork-id: 8728
+O-Subject: [RHEL6 gpxe PATCH] Don't use "lret $2" to return from an interrupt
+Bugzilla: 579964
+RH-Acked-by: Juan Quintela <quintela@redhat.com>
+RH-Acked-by: Zachary Amsden <zamsden@redhat.com>
+RH-Acked-by: Paolo Bonzini <pbonzini@redhat.com>
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=579964
+
+The explanation is:
+
+1) The syslinux image available via PXE at the QE lab was not getting
+   keyboard events
+2) syslinux was looping asking the bios if a keystroke was available
+3) The bios thought no keystroke was available because it was not
+   receiving keyboard interrupts
+4) Keyboard interrupts were not being received because the CPU IF flag
+   was cleared
+5) syslinux was setting the IF flag as soon as it was loaded, but some
+   other code was disabling it
+6) Interrupts were being disabled inside gPXE code
+7) gPXE was not using iret to return from interrupts, leaving the IF
+   flag disabled even if the caller had interrupts enabled
+
+Cherry-pick of upstream commit f44205b9ea928c3cdefb6848e7f20fe11d112522:
+
+From: H. Peter Anvin <hpa@zytor.com>
+Date: Sat, 11 Apr 2009 18:30:22 -0700
+Subject: [PATCH] [pcbios] Don't use "lret $2" to return from an interrupt
+
+Using "lret $2" to return from an interrupt causes interrupts to be
+disabled in the calling program, since the INT instruction will have
+disabled interrupts.  Instead, patch CF on the stack and use iret to
+return.
+
+Interestingly, the original PC BIOS had this bug in at least one
+place.
+
+Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+Signed-off-by: Michael Brown <mcb30@etherboot.org>
+---
+ src/arch/i386/firmware/pcbios/e820mangler.S |   27 ++++++++++++++++++---------
+ src/arch/i386/firmware/pcbios/fakee820.c    |    5 +++--
+ src/arch/i386/interface/pxe/pxe_entry.S     |    7 +++++--
+ 3 files changed, 26 insertions(+), 13 deletions(-)
+
+Signed-off-by: Eduardo Habkost <ehabkost@redhat.com>
+---
+ src/arch/i386/firmware/pcbios/e820mangler.S |   27 ++++++++++++++++++---------
+ src/arch/i386/firmware/pcbios/fakee820.c    |    5 +++--
+ src/arch/i386/interface/pxe/pxe_entry.S     |    7 +++++--
+ 3 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/src/arch/i386/firmware/pcbios/e820mangler.S b/src/arch/i386/firmware/pcbios/e820mangler.S
+index 4ba3fb1..decb083 100644
+--- a/src/arch/i386/firmware/pcbios/e820mangler.S
++++ b/src/arch/i386/firmware/pcbios/e820mangler.S
+@@ -490,6 +490,18 @@ get_mangled_e820:
+ 	.size get_mangled_e820, . - get_mangled_e820
+ 
+ /****************************************************************************
++ * Set/clear CF on the stack as appropriate, assumes stack is as it should
++ * be immediately before IRET
++ ****************************************************************************
++ */
++patch_cf:
++	pushw	%bp
++	movw	%sp, %bp
++	setc	8(%bp)	/* Set/reset CF; clears PF, AF, ZF, SF */
++	popw	%bp
++	ret
++
++/****************************************************************************
+  * INT 15,e820 handler
+  ****************************************************************************
+  */
+@@ -500,7 +512,8 @@ int15_e820:
+ 	popw	%ds
+ 	call	get_mangled_e820
+ 	popw	%ds
+-	lret	$2
++	call	patch_cf
++	iret
+ 	.size int15_e820, . - int15_e820
+ 	
+ /****************************************************************************
+@@ -512,7 +525,7 @@ int15_e801:
+ 	/* Call previous handler */
+ 	pushfw
+ 	lcall	*%cs:int15_vector
+-	pushfw
++	call	patch_cf
+ 	/* Edit result */
+ 	pushw	%ds
+ 	pushw	%cs:rm_ds
+@@ -524,9 +537,7 @@ int15_e801:
+ 	xchgw	%ax, %cx
+ 	xchgw	%bx, %dx
+ 	popw	%ds
+-	/* Restore flags returned by previous handler and return */
+-	popfw
+-	lret	$2
++	iret
+ 	.size int15_e801, . - int15_e801
+ 	
+ /****************************************************************************
+@@ -538,16 +549,14 @@ int15_88:
+ 	/* Call previous handler */
+ 	pushfw
+ 	lcall	*%cs:int15_vector
+-	pushfw
++	call	patch_cf
+ 	/* Edit result */
+ 	pushw	%ds
+ 	pushw	%cs:rm_ds
+ 	popw	%ds
+ 	call	patch_1m
+ 	popw	%ds
+-	/* Restore flags returned by previous handler and return */
+-	popfw
+-	lret	$2
++	iret
+ 	.size int15_88, . - int15_88
+ 		
+ /****************************************************************************
+diff --git a/src/arch/i386/firmware/pcbios/fakee820.c b/src/arch/i386/firmware/pcbios/fakee820.c
+index e171edf..552bf41 100644
+--- a/src/arch/i386/firmware/pcbios/fakee820.c
++++ b/src/arch/i386/firmware/pcbios/fakee820.c
+@@ -63,6 +63,8 @@ void fake_e820 ( void ) {
+ 			      "cmpl $0x534d4150, %%edx\n\t"
+ 			      "jne 99f\n\t"
+ 			      "pushaw\n\t"
++			      "movw %%sp, %%bp\n\t"
++			      "andb $~0x01, 22(%%bp)\n\t" /* Clear return CF */
+ 			      "leaw e820map(%%bx), %%si\n\t"
+ 			      "cs rep movsb\n\t"
+ 			      "popaw\n\t"
+@@ -73,8 +75,7 @@ void fake_e820 ( void ) {
+ 			      "xorl %%ebx,%%ebx\n\t"
+ 			      "\n1:\n\t"
+ 			      "popfw\n\t"
+-			      "clc\n\t"
+-			      "lret $2\n\t"
++			      "iret\n\t"
+ 			      "\n99:\n\t"
+ 			      "popfw\n\t"
+ 			      "ljmp *%%cs:real_int15_vector\n\t" )
+diff --git a/src/arch/i386/interface/pxe/pxe_entry.S b/src/arch/i386/interface/pxe/pxe_entry.S
+index 22ef418..0e8c8e2 100644
+--- a/src/arch/i386/interface/pxe/pxe_entry.S
++++ b/src/arch/i386/interface/pxe/pxe_entry.S
+@@ -199,9 +199,12 @@ pxe_int_1a:
+ 	shll	$4, %edx
+ 	addl	$pxenv, %edx
+ 	movw	$0x564e, %ax
++	pushw	%bp
++	movw	%sp, %bp
++	andb	$~0x01, 8(%bp)	/* Clear CF on return */
++	popw	%bp
+ 	popfw
+-	clc
+-	lret	$2
++	iret
+ 1:	/* INT 1A,other - pass through */
+ 	popfw
+ 	ljmp	*%cs:pxe_int_1a_vector
+-- 
+1.7.0.3
+
