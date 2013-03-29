@@ -1,0 +1,62 @@
+From 3b070e82350c23d83b858b126c83354b3258855d Mon Sep 17 00:00:00 2001
+From: Michael S. Tsirkin <mst@redhat.com>
+Date: Wed, 26 Jan 2011 06:51:34 -0200
+Subject: [PATCH] gpxe/virtio: avoid padding for len >= 64
+
+RH-Author: Michael S. Tsirkin <mst@redhat.com>
+Message-id: <patch-17013-clone-for-rhel60-rhel60>
+Patchwork-id: 19074
+O-Subject: [PATCH resend RHEL6.1/6.0.z] gpxe/virtio: avoid padding for len >= 64
+Bugzilla: 680148
+
+virtio gpxe driver padded all packets to maximum length.
+This confuses some gateways as the ethernet
+standard is to pad only packets of up to 64 byte
+length.
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=672529
+Upstream: N/A, all this code got replaced upstream,
+	new code only pads to 64 bytes there.
+
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+Tested-by: Rami Vaknin <rvaknin@redhat.com>
+
+---
+
+Resending: forgot to Cc list.
+Please ack this one.
+
+ src/drivers/net/virtio-net.c |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+Signed-off-by: Luiz Capitulino <lcapitulino@redhat.com>
+---
+ src/drivers/net/virtio-net.c |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+diff --git a/src/drivers/net/virtio-net.c b/src/drivers/net/virtio-net.c
+index f0afd3f..cc860e5 100644
+--- a/src/drivers/net/virtio-net.c
++++ b/src/drivers/net/virtio-net.c
+@@ -143,6 +143,9 @@ static void virtnet_transmit(struct nic *nic, const char *destaddr,
+         unsigned int type, unsigned int len, const char *data)
+ {
+    struct vring_list list[2];
++   unsigned int blen = len + sizeof tx_eth_frame.hdr;
++   if (blen < 64)
++      blen = 64;
+ 
+    /*
+     * from http://www.etherboot.org/wiki/dev/devmanual :
+@@ -170,7 +173,7 @@ static void virtnet_transmit(struct nic *nic, const char *destaddr,
+    list[0].addr = (char*)&tx_virtio_hdr;
+    list[0].length = sizeof(struct virtio_net_hdr);
+    list[1].addr = (char*)&tx_eth_frame;
+-   list[1].length = ETH_FRAME_LEN;
++   list[1].length = blen;
+ 
+    vring_add_buf(&virtqueue[TX_INDEX], list, 2, 0, 0, 0);
+ 
+-- 
+1.7.4.rc1.16.gd2f15e
+
